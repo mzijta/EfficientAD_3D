@@ -36,12 +36,12 @@ device = 'cuda' if on_gpu else 'cpu'
 out_channels = 384
 grayscale_transform = transforms.RandomGrayscale(0.1)  # apply same to both
 extractor_transform = transforms.Compose([
-    transforms.Resize((512, 512)),
+    transforms.Resize((512, 512, 512)),
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
 pdn_transform = transforms.Compose([
-    transforms.Resize((256, 256)),
+    transforms.Resize((256, 256, 256)),
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
@@ -65,7 +65,7 @@ def main():
     extractor = FeatureExtractor(backbone=backbone,
                                  layers_to_extract_from=['layer2', 'layer3'],
                                  device=device,
-                                 input_shape=(3, 512, 512))
+                                 input_shape=(3, 512, 512, 512))
 
     if model_size == 'small':
         pdn = get_pdn_small(out_channels, padding=True)
@@ -272,7 +272,7 @@ class PatchMaker:
                         ) / self.stride + 1
             number_of_total_patches.append(int(n_patches))
         unfolded_features = unfolded_features.reshape(
-            *features.shape[:2], self.patchsize, self.patchsize, -1
+            *features.shape[:2], self.patchsize, self.patchsize, self.patchsize, -1
         )
         unfolded_features = unfolded_features.permute(0, 4, 1, 2, 3)
 
