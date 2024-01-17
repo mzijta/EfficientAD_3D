@@ -61,6 +61,23 @@ def get_autoencoder(out_channels=384):
                   stride=1, padding=1)
     )
 
+def get_pdn_xsmall(out_channels=384, padding=False):
+    pad_mult = 1 if padding else 0
+    return nn.Sequential(
+        nn.Conv3d(in_channels=3, out_channels=32, kernel_size=4,
+                  padding=3 * pad_mult),
+        nn.ReLU(inplace=True),
+        nn.AvgPool3d(kernel_size=2, stride=2, padding=1 * pad_mult),
+        nn.Conv3d(in_channels=32, out_channels=64, kernel_size=4,
+                  padding=3 * pad_mult),
+        nn.ReLU(inplace=True),
+        nn.AvgPool3d(kernel_size=2, stride=2, padding=1 * pad_mult),
+        nn.Conv3d(in_channels=64, out_channels=64, kernel_size=3,
+                  padding=1 * pad_mult),
+        nn.ReLU(inplace=True),
+        nn.Conv3d(in_channels=64, out_channels=out_channels, kernel_size=4)
+    )
+    
 def get_pdn_small(out_channels=384, padding=False):
     pad_mult = 1 if padding else 0
     return nn.Sequential(

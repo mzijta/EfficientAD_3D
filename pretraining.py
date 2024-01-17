@@ -12,9 +12,11 @@ from torch.utils.data import DataLoader
 from torchvision import transforms
 from torchvision.models import Wide_ResNet101_2_Weights
 from tqdm import tqdm
-from common import (get_pdn_small, get_pdn_medium,
+from common3d import (get_pdn_small, get_pdn_medium, get_pdn_xsmall,
                     ImageFolderWithoutTarget, InfiniteDataloader)
 
+from src.i3res import I3ResNet
+import unfoldNd
 
 def get_argparse():
     parser = argparse.ArgumentParser(
@@ -22,26 +24,29 @@ def get_argparse():
         description='What the program does',
         epilog='Text at the bottom of help')
     parser.add_argument('-o', '--output_folder',
-                        default='output/pretraining/1/')
+                        default='output/pretraining/small')
     return parser.parse_args()
 
 # variables
 model_size = 'small'
-imagenet_train_path = './ILSVRC/Data/CLS-LOC/train'
+imagenet_train_path = '/trinity/home/mzijta/repositories/phd_project/anomalib/datasets/imagenette/imagenette2/train'
 seed = 42
 on_gpu = torch.cuda.is_available()
 device = 'cuda' if on_gpu else 'cpu'
-
+frame_nb=16
+image_size = 64
+half_image_size = int(image_size/2)
+eight_image_size = int(image_size/8)
 # constants
 out_channels = 384
 grayscale_transform = transforms.RandomGrayscale(0.1)  # apply same to both
 extractor_transform = transforms.Compose([
-    transforms.Resize((512, 512, 512)),
+    transforms.Resize((image_size, image_size)),
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
 pdn_transform = transforms.Compose([
-    transforms.Resize((256, 256, 256)),
+    transforms.Resize((half_image_size, half_image_size)),
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
@@ -49,39 +54,42 @@ pdn_transform = transforms.Compose([
 def train_transform(image):
     image = grayscale_transform(image)
     return extractor_transform(image), pdn_transform(image)
-
+    
 def main():
+    resnet = torchvision.models.resnet101(pretrained=True)
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
 
     config = get_argparse()
-
-    os.makedirs(config.output_folder)
-
-    backbone = torchvision.models.wide_resnet101_2(
-        weights=Wide_ResNet101_2_Weights.IMAGENET1K_V1)
+    if not os.path.isdir(config.output_folder):
+        os.makedirs(config.output_folder)
+    backbone = I3ResNet(copy.deepcopy(resnet))
+    backbone.load_state_dict(torch.load("models/model_3d_state_dict_n32_101.pth"),strict=False)
+    #backbone = torch.load(r"models/model_3d_state_dict.pth")
+    backbone.eval()
 
     extractor = FeatureExtractor(backbone=backbone,
                                  layers_to_extract_from=['layer2', 'layer3'],
                                  device=device,
-                                 input_shape=(3, 512, 512, 512))
+                                 input_shape=(3, image_size, image_size, image_size))
 
     if model_size == 'small':
         pdn = get_pdn_small(out_channels, padding=True)
     elif model_size == 'medium':
         pdn = get_pdn_medium(out_channels, padding=True)
+    elif model_size == 'xsmall':
+        pdn = get_pdn_xsmall(out_channels, padding=True)
     else:
         raise Exception()
-
-    train_set = ImageFolderWithoutTarget(imagenet_train_path,
-                                         transform=train_transform)
-    train_loader = DataLoader(train_set, batch_size=16, shuffle=True,
+    print('pdn loaded')
+    train_set = ImageFolderWithoutTarget(imagenet_train_path, transform=train_transform)
+    train_loader = DataLoader(train_set, batch_size=1, shuffle=True,
                               num_workers=7, pin_memory=True)
     train_loader = InfiniteDataloader(train_loader)
 
     channel_mean, channel_std = feature_normalization(extractor=extractor,
-                                                      train_loader=train_loader)
+                                                      train_loader=train_loader,steps=10000)
 
     pdn.train()
     if on_gpu:
@@ -91,6 +99,8 @@ def main():
 
     tqdm_obj = tqdm(range(60000))
     for iteration, (image_fe, image_pdn) in zip(tqdm_obj, train_loader):
+        image_fe = image_fe.unsqueeze(2).repeat(1, 1, image_size, 1, 1)
+        image_pdn = image_pdn.unsqueeze(2).repeat(1, 1, half_image_size, 1, 1)
         if on_gpu:
             image_fe = image_fe.cuda()
             image_pdn = image_pdn.cuda()
@@ -127,10 +137,11 @@ def feature_normalization(extractor, train_loader, steps=10000):
     normalization_count = 0
     with tqdm(desc='Computing mean of features', total=steps) as pbar:
         for image_fe, _ in train_loader:
+            image_fe = image_fe.unsqueeze(2).repeat(1, 1, image_size, 1, 1)
             if on_gpu:
                 image_fe = image_fe.cuda()
             output = extractor.embed(image_fe)
-            mean_output = torch.mean(output, dim=[0, 2, 3])
+            mean_output = torch.mean(output, dim=[0, 2, 3,4])
             mean_outputs.append(mean_output)
             normalization_count += len(image_fe)
             if normalization_count >= steps:
@@ -139,17 +150,20 @@ def feature_normalization(extractor, train_loader, steps=10000):
             else:
                 pbar.update(len(image_fe))
     channel_mean = torch.mean(torch.stack(mean_outputs), dim=0)
-    channel_mean = channel_mean[None, :, None, None]
+    channel_mean = channel_mean[None, :, None, None, None]
 
     mean_distances = []
     normalization_count = 0
     with tqdm(desc='Computing variance of features', total=steps) as pbar:
         for image_fe, _ in train_loader:
+            image_fe = image_fe.unsqueeze(2).repeat(1, 1, image_size, 1, 1)
             if on_gpu:
                 image_fe = image_fe.cuda()
             output = extractor.embed(image_fe)
+            print(output.size())
+            print(channel_mean.size())
             distance = (output - channel_mean) ** 2
-            mean_distance = torch.mean(distance, dim=[0, 2, 3])
+            mean_distance = torch.mean(distance, dim=[0, 2, 3, 4])
             mean_distances.append(mean_distance)
             normalization_count += len(image_fe)
             if normalization_count >= steps:
@@ -158,7 +172,7 @@ def feature_normalization(extractor, train_loader, steps=10000):
             else:
                 pbar.update(len(image_fe))
     channel_var = torch.mean(torch.stack(mean_distances), dim=0)
-    channel_var = channel_var[None, :, None, None]
+    channel_var = channel_var[None, :, None, None, None]
     channel_std = torch.sqrt(channel_var)
 
     return channel_mean, channel_std
@@ -171,15 +185,17 @@ class FeatureExtractor(torch.nn.Module):
         self.layers_to_extract_from = layers_to_extract_from
         self.device = device
         self.input_shape = input_shape
+        print('input feature', input_shape)
         self.patch_maker = PatchMaker(3, stride=1)
         self.forward_modules = torch.nn.ModuleDict({})
 
         feature_aggregator = NetworkFeatureAggregator(
             self.backbone, self.layers_to_extract_from, self.device
         )
+        
         feature_dimensions = feature_aggregator.feature_dimensions(input_shape)
+        print('feature dimensions', feature_dimensions)
         self.forward_modules["feature_aggregator"] = feature_aggregator
-
         preprocessing = Preprocessing(feature_dimensions, 1024)
         self.forward_modules["preprocessing"] = preprocessing
 
@@ -197,9 +213,11 @@ class FeatureExtractor(torch.nn.Module):
 
         _ = self.forward_modules["feature_aggregator"].eval()
         features = self.forward_modules["feature_aggregator"](images)
-
+        
+        print('images', images.size())
         features = [features[layer] for layer in self.layers_to_extract_from]
-
+        print('features of images layer2', features[0].size())
+        print('features of images layer3', features[1].size())
         features = [
             self.patch_maker.patchify(x, return_spatial_info=True) for x in
             features
@@ -207,42 +225,52 @@ class FeatureExtractor(torch.nn.Module):
         patch_shapes = [x[1] for x in features]
         features = [x[0] for x in features]
         ref_num_patches = patch_shapes[0]
+        print('ref', ref_num_patches)
+        
 
         for i in range(1, len(features)):
             _features = features[i]
+            print(_features.size())
             patch_dims = patch_shapes[i]
-
+            print('patch dims', patch_dims)
             _features = _features.reshape(
-                _features.shape[0], patch_dims[0], patch_dims[1],
+                _features.shape[0], patch_dims[0], patch_dims[1], patch_dims[2],
                 *_features.shape[2:]
             )
-            _features = _features.permute(0, -3, -2, -1, 1, 2)
+            print('features', _features.size())
+            _features = _features.permute(0, -4, -3, -2, -1, 1, 2,3)
+            print('features', _features.size())
             perm_base_shape = _features.shape
-            _features = _features.reshape(-1, *_features.shape[-2:])
+            _features = _features.reshape(-1, *_features.shape[-3:])
+            print('features', _features.size())
             _features = F.interpolate(
                 _features.unsqueeze(1),
-                size=(ref_num_patches[0], ref_num_patches[1]),
-                mode="bilinear",
+                size=(ref_num_patches[0], ref_num_patches[1],ref_num_patches[2]),
+                mode="trilinear",
                 align_corners=False,
             )
             _features = _features.squeeze(1)
             _features = _features.reshape(
-                *perm_base_shape[:-2], ref_num_patches[0], ref_num_patches[1]
+                *perm_base_shape[:-3], ref_num_patches[0], ref_num_patches[1], ref_num_patches[2]
             )
-            _features = _features.permute(0, -2, -1, 1, 2, 3)
+            _features = _features.permute(0, -3, -2, -1, 1, 2, 3,4)
             _features = _features.reshape(len(_features), -1,
-                                          *_features.shape[-3:])
+                                          *_features.shape[-4:])
             features[i] = _features
-        features = [x.reshape(-1, *x.shape[-3:]) for x in features]
+        features = [x.reshape(-1, *x.shape[-4:]) for x in features]
 
         # As different feature backbones & patching provide differently
         # sized features, these are brought into the correct form here.
         features = self.forward_modules["preprocessing"](features)
         features = self.forward_modules["preadapt_aggregator"](features)
-        features = torch.reshape(features, (-1, 64, 64, out_channels))
-        features = torch.permute(features, (0, 3, 1, 2))
+        print('preembed features', features.size())
+        features = torch.reshape(features, (-1, eight_image_size, eight_image_size, eight_image_size, out_channels))
+        features = torch.permute(features, (0, 4, 1, 2,3))
+        features= features[0:1]
+        print('embed features', features.size())
 
         return features
+
 
 
 # Image handling classes.
@@ -260,13 +288,15 @@ class PatchMaker:
             patchsize]
         """
         padding = int((self.patchsize - 1) / 2)
-        unfolder = torch.nn.Unfold(
+        unfolder = unfoldNd.UnfoldNd(
             kernel_size=self.patchsize, stride=self.stride, padding=padding,
             dilation=1
         )
         unfolded_features = unfolder(features)
+        print('features', features.size())
+        print('unf', unfolded_features.size())
         number_of_total_patches = []
-        for s in features.shape[-2:]:
+        for s in features.shape[-3:]:
             n_patches = (
                                 s + 2 * padding - 1 * (self.patchsize - 1) - 1
                         ) / self.stride + 1
@@ -274,11 +304,13 @@ class PatchMaker:
         unfolded_features = unfolded_features.reshape(
             *features.shape[:2], self.patchsize, self.patchsize, self.patchsize, -1
         )
-        unfolded_features = unfolded_features.permute(0, 4, 1, 2, 3)
-
+        print('unf patch', unfolded_features.size())
+        unfolded_features = unfolded_features.permute(0, 5, 1, 2, 3,4)
+        print('unf patch perm', unfolded_features.size())
         if return_spatial_info:
             return unfolded_features, number_of_total_patches
         return unfolded_features
+        
 
 
 class Preprocessing(torch.nn.Module):
