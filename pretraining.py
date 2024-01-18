@@ -13,10 +13,11 @@ from torchvision import transforms
 from torchvision.models import Wide_ResNet101_2_Weights
 from tqdm import tqdm
 from common3d import (get_pdn_small, get_pdn_medium, get_pdn_xsmall,
-                    ImageFolderWithoutTarget, InfiniteDataloader)
+                      ImageFolderWithoutTarget, InfiniteDataloader)
 
 from src.i3res import I3ResNet
 import unfoldNd
+
 
 def get_argparse():
     parser = argparse.ArgumentParser(
@@ -27,16 +28,17 @@ def get_argparse():
                         default='output/pretraining/small')
     return parser.parse_args()
 
+
 # variables
 model_size = 'small'
 imagenet_train_path = '/trinity/home/mzijta/repositories/phd_project/anomalib/datasets/imagenette/imagenette2/train'
 seed = 42
 on_gpu = torch.cuda.is_available()
 device = 'cuda' if on_gpu else 'cpu'
-frame_nb=16
+frame_nb = 16
 image_size = 64
-half_image_size = int(image_size/2)
-eight_image_size = int(image_size/8)
+half_image_size = int(image_size / 2)
+eight_image_size = int(image_size / 8)
 # constants
 out_channels = 384
 grayscale_transform = transforms.RandomGrayscale(0.1)  # apply same to both
@@ -51,10 +53,23 @@ pdn_transform = transforms.Compose([
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
 
+
 def train_transform(image):
     image = grayscale_transform(image)
     return extractor_transform(image), pdn_transform(image)
-    
+
+
+def expand_2d_to_3d_image(image, image_size):
+    stack_direction = random.randint(0, 2)
+    if stack_direction == 0:
+        image = image.unsqueeze(2).repeat(1, 1, image_size, 1, 1)
+    elif stack_direction == 1:
+        image = image.unsqueeze(3).repeat(1, 1, 1, image_size, 1)
+    elif stack_direction == 2:
+        image = image.unsqueeze(4).repeat(1, 1, 1, 1, image_size)
+    return image
+
+
 def main():
     resnet = torchvision.models.resnet101(pretrained=True)
     torch.manual_seed(seed)
@@ -65,8 +80,8 @@ def main():
     if not os.path.isdir(config.output_folder):
         os.makedirs(config.output_folder)
     backbone = I3ResNet(copy.deepcopy(resnet))
-    backbone.load_state_dict(torch.load("models/model_3d_state_dict_n32_101.pth"),strict=False)
-    #backbone = torch.load(r"models/model_3d_state_dict.pth")
+    backbone.load_state_dict(torch.load("models/model_3d_state_dict_n32_101.pth"), strict=False)
+    # backbone = torch.load(r"models/model_3d_state_dict.pth")
     backbone.eval()
 
     extractor = FeatureExtractor(backbone=backbone,
@@ -89,7 +104,7 @@ def main():
     train_loader = InfiniteDataloader(train_loader)
 
     channel_mean, channel_std = feature_normalization(extractor=extractor,
-                                                      train_loader=train_loader,steps=10000)
+                                                      train_loader=train_loader, steps=10000)
 
     pdn.train()
     if on_gpu:
@@ -99,15 +114,15 @@ def main():
 
     tqdm_obj = tqdm(range(60000))
     for iteration, (image_fe, image_pdn) in zip(tqdm_obj, train_loader):
-        image_fe = image_fe.unsqueeze(2).repeat(1, 1, image_size, 1, 1)
-        image_pdn = image_pdn.unsqueeze(2).repeat(1, 1, half_image_size, 1, 1)
+        image_fe = expand_2d_to_3d_image(image_fe, image_size)
+        image_pdn = expand_2d_to_3d_image(image_pdn, half_image_size)
         if on_gpu:
             image_fe = image_fe.cuda()
             image_pdn = image_pdn.cuda()
         target = extractor.embed(image_fe)
         target = (target - channel_mean) / channel_std
         prediction = pdn(image_pdn)
-        loss = torch.mean((target - prediction)**2)
+        loss = torch.mean((target - prediction) ** 2)
 
         optimizer.zero_grad()
         loss.backward()
@@ -132,16 +147,15 @@ def main():
 
 @torch.no_grad()
 def feature_normalization(extractor, train_loader, steps=10000):
-
     mean_outputs = []
     normalization_count = 0
     with tqdm(desc='Computing mean of features', total=steps) as pbar:
         for image_fe, _ in train_loader:
-            image_fe = image_fe.unsqueeze(2).repeat(1, 1, image_size, 1, 1)
+            image_fe = expand_2d_to_3d_image(image_fe, image_size)
             if on_gpu:
                 image_fe = image_fe.cuda()
             output = extractor.embed(image_fe)
-            mean_output = torch.mean(output, dim=[0, 2, 3,4])
+            mean_output = torch.mean(output, dim=[0, 2, 3, 4])
             mean_outputs.append(mean_output)
             normalization_count += len(image_fe)
             if normalization_count >= steps:
@@ -156,7 +170,7 @@ def feature_normalization(extractor, train_loader, steps=10000):
     normalization_count = 0
     with tqdm(desc='Computing variance of features', total=steps) as pbar:
         for image_fe, _ in train_loader:
-            image_fe = image_fe.unsqueeze(2).repeat(1, 1, image_size, 1, 1)
+            image_fe = expand_2d_to_3d_image(image_fe, image_size)
             if on_gpu:
                 image_fe = image_fe.cuda()
             output = extractor.embed(image_fe)
@@ -192,7 +206,7 @@ class FeatureExtractor(torch.nn.Module):
         feature_aggregator = NetworkFeatureAggregator(
             self.backbone, self.layers_to_extract_from, self.device
         )
-        
+
         feature_dimensions = feature_aggregator.feature_dimensions(input_shape)
         print('feature dimensions', feature_dimensions)
         self.forward_modules["feature_aggregator"] = feature_aggregator
@@ -213,7 +227,7 @@ class FeatureExtractor(torch.nn.Module):
 
         _ = self.forward_modules["feature_aggregator"].eval()
         features = self.forward_modules["feature_aggregator"](images)
-        
+
         print('images', images.size())
         features = [features[layer] for layer in self.layers_to_extract_from]
         print('features of images layer2', features[0].size())
@@ -226,7 +240,6 @@ class FeatureExtractor(torch.nn.Module):
         features = [x[0] for x in features]
         ref_num_patches = patch_shapes[0]
         print('ref', ref_num_patches)
-        
 
         for i in range(1, len(features)):
             _features = features[i]
@@ -238,14 +251,14 @@ class FeatureExtractor(torch.nn.Module):
                 *_features.shape[2:]
             )
             print('features', _features.size())
-            _features = _features.permute(0, -4, -3, -2, -1, 1, 2,3)
+            _features = _features.permute(0, -4, -3, -2, -1, 1, 2, 3)
             print('features', _features.size())
             perm_base_shape = _features.shape
             _features = _features.reshape(-1, *_features.shape[-3:])
             print('features', _features.size())
             _features = F.interpolate(
                 _features.unsqueeze(1),
-                size=(ref_num_patches[0], ref_num_patches[1],ref_num_patches[2]),
+                size=(ref_num_patches[0], ref_num_patches[1], ref_num_patches[2]),
                 mode="trilinear",
                 align_corners=False,
             )
@@ -253,7 +266,7 @@ class FeatureExtractor(torch.nn.Module):
             _features = _features.reshape(
                 *perm_base_shape[:-3], ref_num_patches[0], ref_num_patches[1], ref_num_patches[2]
             )
-            _features = _features.permute(0, -3, -2, -1, 1, 2, 3,4)
+            _features = _features.permute(0, -3, -2, -1, 1, 2, 3, 4)
             _features = _features.reshape(len(_features), -1,
                                           *_features.shape[-4:])
             features[i] = _features
@@ -265,12 +278,11 @@ class FeatureExtractor(torch.nn.Module):
         features = self.forward_modules["preadapt_aggregator"](features)
         print('preembed features', features.size())
         features = torch.reshape(features, (-1, eight_image_size, eight_image_size, eight_image_size, out_channels))
-        features = torch.permute(features, (0, 4, 1, 2,3))
-        features= features[0:1]
+        features = torch.permute(features, (0, 4, 1, 2, 3))
+        features = features[0:1]
         print('embed features', features.size())
 
         return features
-
 
 
 # Image handling classes.
@@ -305,12 +317,11 @@ class PatchMaker:
             *features.shape[:2], self.patchsize, self.patchsize, self.patchsize, -1
         )
         print('unf patch', unfolded_features.size())
-        unfolded_features = unfolded_features.permute(0, 5, 1, 2, 3,4)
+        unfolded_features = unfolded_features.permute(0, 5, 1, 2, 3, 4)
         print('unf patch perm', unfolded_features.size())
         if return_spatial_info:
             return unfolded_features, number_of_total_patches
         return unfolded_features
-        
 
 
 class Preprocessing(torch.nn.Module):
@@ -440,6 +451,7 @@ class ForwardHook:
 
 class LastLayerToExtractReachedException(Exception):
     pass
+
 
 if __name__ == '__main__':
     main()
