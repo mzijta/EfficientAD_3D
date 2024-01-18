@@ -157,16 +157,7 @@ def main():
     scheduler = torch.optim.lr_scheduler.StepLR(
         optimizer, step_size=int(0.95 * config.train_steps), gamma=0.1)
 
-    q_st_start, q_st_end, q_ae_start, q_ae_end = map_normalization(
-        validation_loader=validation_set, teacher=teacher, student=student,
-        autoencoder=autoencoder, teacher_mean=teacher_mean,
-        teacher_std=teacher_std, desc='Final map normalization')
-    auc = test(
-        test_set_good=test_set_good, test_set_defect=test_set_bad, teacher=teacher, student=student,
-        autoencoder=autoencoder, teacher_mean=teacher_mean,
-        teacher_std=teacher_std, q_st_start=q_st_start, q_st_end=q_st_end,
-        q_ae_start=q_ae_start, q_ae_end=q_ae_end,
-        test_output_dir=test_output_dir, desc='Final inference')
+
 
     tqdm_obj = tqdm(range(config.train_steps))
     for iteration,  image_penalty in zip(
