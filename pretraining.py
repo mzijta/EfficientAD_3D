@@ -25,22 +25,22 @@ def get_argparse():
         description='What the program does',
         epilog='Text at the bottom of help')
     parser.add_argument('-o', '--output_folder',
-                        default='output/pretraining/small')
+                        default='output/pretraining/medium_256_out10000')
     return parser.parse_args()
 
 
 # variables
-model_size = 'small'
+model_size = 'medium'
 imagenet_train_path = '/trinity/home/mzijta/repositories/phd_project/anomalib/datasets/imagenette/imagenette2/train'
 seed = 42
 on_gpu = torch.cuda.is_available()
 device = 'cuda' if on_gpu else 'cpu'
 frame_nb = 16
-image_size = 64
+image_size = 256
 half_image_size = int(image_size / 2)
 eight_image_size = int(image_size / 8)
 # constants
-out_channels = 384
+out_channels = 10000  #384
 grayscale_transform = transforms.RandomGrayscale(0.1)  # apply same to both
 extractor_transform = transforms.Compose([
     transforms.Resize((image_size, image_size)),
@@ -59,14 +59,14 @@ def train_transform(image):
     return extractor_transform(image), pdn_transform(image)
 
 
-def expand_2d_to_3d_image(image, image_size):
+def expand_2d_to_3d_image(image, image_size_len):
     stack_direction = random.randint(0, 2)
     if stack_direction == 0:
-        image = image.unsqueeze(2).repeat(1, 1, image_size, 1, 1)
+        image = image.unsqueeze(2).repeat(1, 1, image_size_len, 1, 1)
     elif stack_direction == 1:
-        image = image.unsqueeze(3).repeat(1, 1, 1, image_size, 1)
+        image = image.unsqueeze(3).repeat(1, 1, 1, image_size_len, 1)
     elif stack_direction == 2:
-        image = image.unsqueeze(4).repeat(1, 1, 1, 1, image_size)
+        image = image.unsqueeze(4).repeat(1, 1, 1, 1, image_size_len)
     return image
 
 
@@ -230,8 +230,6 @@ class FeatureExtractor(torch.nn.Module):
 
         print('images', images.size())
         features = [features[layer] for layer in self.layers_to_extract_from]
-        print('features of images layer2', features[0].size())
-        print('features of images layer3', features[1].size())
         features = [
             self.patch_maker.patchify(x, return_spatial_info=True) for x in
             features
@@ -243,19 +241,15 @@ class FeatureExtractor(torch.nn.Module):
 
         for i in range(1, len(features)):
             _features = features[i]
-            print(_features.size())
+
             patch_dims = patch_shapes[i]
-            print('patch dims', patch_dims)
             _features = _features.reshape(
                 _features.shape[0], patch_dims[0], patch_dims[1], patch_dims[2],
                 *_features.shape[2:]
             )
-            print('features', _features.size())
             _features = _features.permute(0, -4, -3, -2, -1, 1, 2, 3)
-            print('features', _features.size())
             perm_base_shape = _features.shape
             _features = _features.reshape(-1, *_features.shape[-3:])
-            print('features', _features.size())
             _features = F.interpolate(
                 _features.unsqueeze(1),
                 size=(ref_num_patches[0], ref_num_patches[1], ref_num_patches[2]),

@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --ntasks-per-node=6
-#SBATCH --mem-per-cpu=80G
+#SBATCH --mem-per-cpu=120G
 #SBATCH --gres=gpu:1
-#SBATCH -t 10:00:00
+#SBATCH -t 100:00:00
 #SBATCH -p hm
 #SBATCH -o /trinity/home/mzijta/output/out_%j.log
 #SBATCH -e /trinity/home/mzijta/output/error_%j.log

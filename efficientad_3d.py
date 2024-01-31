@@ -14,6 +14,9 @@ from tqdm import tqdm
 from common3d import get_autoencoder, get_pdn_small, get_pdn_medium, \
     ImageFolderWithoutTarget, ImageFolderWithPath, InfiniteDataloader
 from sklearn.metrics import roc_auc_score
+import skimage.transform as skTrans
+import itk
+
 
 def get_argparse():
     parser = argparse.ArgumentParser()
@@ -25,7 +28,7 @@ def get_argparse():
     parser.add_argument('-o', '--output_dir', default='output_3d_model')
     parser.add_argument('-m', '--model_size', default='small',
                         choices=['small', 'medium'])
-    parser.add_argument('-w', '--weights', default='models/teacher_small_final_state.pth')
+    parser.add_argument('-w', '--weights', default='output/pretraining/small_new_128/teacher_small_final_state.pth')
     parser.add_argument('-i', '--imagenet_train_path',
                         default='none',
                         help='Set to "none" to disable ImageNet' +
@@ -72,6 +75,7 @@ def main():
     random.seed(seed)
 
     config = get_argparse()
+    print(config)
 
     if config.dataset == 'mvtec_ad':
         dataset_path = config.mvtec_ad_path
@@ -88,7 +92,8 @@ def main():
     train_output_dir = os.path.join(config.output_dir, 'trainings',
                                     config.dataset, config.subdataset)
     test_output_dir = os.path.join(config.output_dir, 'anomaly_maps',
-                                   config.dataset, config.subdataset, 'test')
+                                   config.dataset, config.subdataset, 'test_128')
+    print(test_output_dir)
     if not os.path.isdir(train_output_dir):
         os.makedirs(train_output_dir)
     if not os.path.isdir(test_output_dir):
@@ -101,7 +106,6 @@ def main():
     test_set_good = list_full_paths(os.path.join(test_set_path, 'good'))
     validation_set = list_full_paths(os.path.join(dataset_path, config.subdataset, 'val', 'good'))
     train_set = full_train_set
-    print(train_set)
 
     #train_loader = DataLoader(train_set, batch_size=1, shuffle=True,
     #                          num_workers=4, pin_memory=True)
@@ -178,7 +182,7 @@ def main():
         distance_st = (teacher_output_st - student_output_st) ** 2
         d_hard = torch.quantile(distance_st, q=0.999)
         loss_hard = torch.mean(distance_st[distance_st >= d_hard])
-
+        print(teacher_output_st.size())
         if image_penalty is not None:
             student_output_penalty = student(image_penalty)[:, :out_channels]
             loss_penalty = torch.mean(student_output_penalty**2)
@@ -187,6 +191,7 @@ def main():
             loss_st = loss_hard
 
         ae_output = autoencoder(image_ae)
+        print(ae_output.size())
         with torch.no_grad():
             teacher_output_ae = teacher(image_ae)
             teacher_output_ae = (teacher_output_ae - teacher_mean) / teacher_std
@@ -196,7 +201,8 @@ def main():
         loss_ae = torch.mean(distance_ae)
         loss_stae = torch.mean(distance_stae)
         loss_total = loss_st + loss_ae + loss_stae
-
+        print('teacher', teacher_output_ae.size())
+        print('ae', ae_output.size())
         optimizer.zero_grad()
         loss_total.backward()
         optimizer.step()
@@ -259,6 +265,68 @@ def main():
         test_output_dir=test_output_dir, desc='Final inference')
     print('Final image auc: {:.4f}'.format(auc))
 
+
+    
+def superimpose_anomaly_map(
+    anomaly_map: np.ndarray, image: np.ndarray, alpha: float = 0.4, gamma: int = 0, normalize: bool = True
+) -> np.ndarray:
+    """Superimpose anomaly map on top of in the input image.
+
+    Args:
+        anomaly_map (np.ndarray): Anomaly map
+        image (np.ndarray): Input image
+        alpha (float, optional): Weight to overlay anomaly map
+            on the input image. Defaults to 0.4.
+        gamma (int, optional): Value to add to the blended image
+            to smooth the processing. Defaults to 0. Overall,
+            the formula to compute the blended image is
+            I' = (alpha*I1 + (1-alpha)*I2) + gamma
+        normalize: whether or not the anomaly maps should
+            be normalized to image min-max
+
+
+    Returns:
+        np.ndarray: Image with anomaly map superimposed on top of it.
+    """
+
+    #anomaly_map = anomaly_map_to_color_map(anomaly_map.squeeze(), normalize=normalize)
+    anomaly_map_itk = itk.GetImageFromArray(anomaly_map)
+    image_itk = itk.GetImageFromArray(image)
+    image_itk_array = itk.GetArrayFromImage(image_itk,ttype=type(image_itk))
+    PixelType = itk.ctype("unsigned char")
+    Dimension = 3
+    ImageType = itk.Image[PixelType, Dimension]
+    LabelType = itk.ctype("unsigned long")
+    LabelObjectType = itk.StatisticsLabelObject[LabelType, Dimension]
+    LabelMapType = itk.LabelMap[LabelObjectType]
+    RGBImageType = itk.Image[itk.RGBPixel[PixelType], Dimension]
+    overlayFilter = itk.LabelMapOverlayImageFilter[
+        LabelMapType, ImageType, RGBImageType
+    ].New()
+    InputImageType = type(image_itk)
+    castImageFilter = itk.CastImageFilter[InputImageType, ImageType].New()
+    image_itk_cast = castImageFilter.SetInput(image_itk)
+    InputImageType = type(anomaly_map_itk)
+    castImageFilter = itk.CastImageFilter[InputImageType, ImageType].New()
+    anomaly_map_itk_cast = castImageFilter.SetInput(anomaly_map_itk)
+    converter = itk.LabelImageToLabelMapFilter[ImageType, LabelMapType].New()
+    converter.SetInput(anomaly_map_itk_cast)
+    overlayFilter.SetInput(converter.GetOutput())
+    overlayFilter.SetFeatureImage(image_itk_cast)
+    overlayFilter.SetOpacity(0.5)
+    print(overlayFilter)
+    superimposed_map = overlayFilter.GetOutput()
+    #print(superimposed_map.size())
+    OriginalRegion = superimposed_map.GetLargestPossibleRegion()
+    OriginalSize = OriginalRegion.GetSize()
+
+    print (f'ITK image size = {OriginalSize}')
+    superimposed_map = itk.GetArrayFromImage(overlayFilter,ttype=type(superimposed_map))
+    
+    return superimposed_map
+
+
+
 def test(test_set_good, test_set_defect, teacher, student, autoencoder, teacher_mean, teacher_std,
          q_st_start, q_st_end, q_ae_start, q_ae_end, test_output_dir=None,
          desc='Running inference'):
@@ -283,12 +351,16 @@ def test(test_set_good, test_set_defect, teacher, student, autoencoder, teacher_
             autoencoder=autoencoder, teacher_mean=teacher_mean,
             teacher_std=teacher_std, q_st_start=q_st_start, q_st_end=q_st_end,
             q_ae_start=q_ae_start, q_ae_end=q_ae_end)
-        map_combined = torch.nn.functional.pad(map_combined, (4, 4, 4, 4, 4, 4))
         print(map_combined.size())
-        print(map_combined)
+        map_combined = torch.nn.functional.pad(map_combined, (4,4,4,4,4,4))
         map_combined = torch.nn.functional.interpolate(
             map_combined, (orig_height, orig_width, orig_length), mode='trilinear')
         map_combined = map_combined[0, 0].cpu().numpy()
+        teacher_output_save = torch.nn.functional.pad(teacher(image), (4, 4, 4, 4, 4, 4))
+        teacher_output_save = torch.nn.functional.interpolate(teacher_output_save, (192, 192, 192), mode='trilinear')
+        teacher_output_save = teacher_output_save[0, 0].cpu().detach().numpy()
+        print(np.shape(map_combined), map_combined.dtype)
+        print(np.shape(og_image_array), og_image_array.dtype)
 
         defect_class = list_good_defect[i]
         if test_output_dir is not None:
@@ -298,6 +370,18 @@ def test(test_set_good, test_set_defect, teacher, student, autoencoder, teacher_
             file = os.path.join(test_output_dir, defect_class, img_nm)
             final_img = nib.Nifti1Image(map_combined, og_image.affine)
             nib.save(final_img, file)
+            if not os.path.exists(os.path.join(test_output_dir, 'inter')):
+                os.makedirs(os.path.join(test_output_dir, 'inter'))
+            file = os.path.join(test_output_dir, 'inter', img_nm)
+            final_img = nib.Nifti1Image(teacher_output_save, og_image.affine)
+            nib.save(final_img, file)
+            if not os.path.exists(os.path.join(test_output_dir, defect_class+'_overlay')):
+                os.makedirs(os.path.join(test_output_dir, defect_class+'_overlay'))
+            file = os.path.join(test_output_dir, defect_class+'_overlay', img_nm)
+            #superimpose = superimpose_anomaly_map(map_combined, og_image_array)
+            superimpose = np.stack((map_combined, og_image_array, og_image_array), axis=-1)
+            final_img = nib.Nifti1Image(superimpose, og_image.affine)
+            nib.save(final_img, file)    
 
         y_true_image = 0 if defect_class == 'good' else 1
         y_score_image = np.max(map_combined)
@@ -357,7 +441,6 @@ def teacher_normalization(teacher, train_loader):
 
     mean_outputs = []
     for train_image_in_list in train_loader:
-        print(train_image_in_list)
         train_image = load_nifti_image_to_5d_tensor(train_image_in_list, image_size)
         if on_gpu:
             train_image = train_image.cuda()
@@ -382,10 +465,11 @@ def teacher_normalization(teacher, train_loader):
 
     return channel_mean, channel_std
 
-def load_nifti_image_to_5d_tensor(image_in_list, image_size):
+def load_nifti_image_to_5d_tensor(image_in_list, image_size_len):
     image = nib.load(image_in_list).get_fdata()
-    image = np.resize(image, (image_size, image_size, image_size))
-    image = np.resize(image, (1, 3, image_size, image_size, image_size)).astype(np.float32)
+    result = skTrans.resize(image, (image_size_len, image_size_len, image_size_len), order=1, preserve_range=True)
+    image = (result - np.min(result)) / (np.max(result) - np.min(result))
+    image = np.resize(image, (1, 3, image_size_len, image_size_len, image_size_len)).astype(np.float32)
     image = torch.from_numpy(image)
     return image
 
